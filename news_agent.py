@@ -228,10 +228,14 @@ def run(max_steps: int = 15) -> None:
             args = json.loads(call.function.arguments or "{}")
             print(f"[Шаг {step}] {call.function.name}({json.dumps(args, ensure_ascii=False)[:100]})")
             output = FUNCTIONS[call.function.name](**args)
+            if output.get("error") or output.get("errors") or output.get("status") == "error":
+                print(f"          Проблема: {json.dumps(output, ensure_ascii=False)[:500]}")
             messages.append({"role": "tool", "tool_call_id": call.id,
                              "content": json.dumps(output, ensure_ascii=False)})
 
     if not published:
+        last = messages[-1].get("content") if isinstance(messages[-1], dict) else None
+        print(f"Последний ответ модели: {last}", file=sys.stderr)
         print("Агент завершил работу, но дайджест не опубликован.", file=sys.stderr)
         sys.exit(1)  # чтобы запуск по расписанию отметился как упавший
     print(f"Готово: {datetime.now(timezone.utc).isoformat()}")
