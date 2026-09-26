@@ -15,7 +15,7 @@
 
 ```bash
 pip install -r requirements.txt
-export ANTHROPIC_API_KEY="sk-ant-..."
+export OPENAI_API_KEY="sk-..."
 DRY_RUN=1 python news_agent.py        # только печатает дайджест, ничего не отправляет
 
 export TELEGRAM_BOT_TOKEN="123:ABC..."
@@ -27,7 +27,7 @@ python news_agent.py                  # публикует в канал
 
 1. Создайте **приватный** репозиторий на GitHub и загрузите туда все файлы, включая папку `.github`.
 2. Settings → Secrets and variables → Actions → New repository secret:
-   `ANTHROPIC_API_KEY`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`.
+   `OPENAI_API_KEY`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`.
 3. Actions → Daily news digest → **Run workflow**: первый запуск вручную для проверки.
 4. Дальше запуск идёт сам в 08:50 по Алматы. Время меняется в `cron` в файле
    `.github/workflows/daily-digest.yml` (время указывается в UTC).

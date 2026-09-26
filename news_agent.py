@@ -6,11 +6,11 @@
   LLM (выбирает и пишет) + инструменты (читают RSS, статьи, публикуют) + цикл.
 
 Переменные окружения:
-  ANTHROPIC_API_KEY   ключ Anthropic
+  OPENAI_API_KEY      ключ OpenAI
   TELEGRAM_BOT_TOKEN  токен бота от @BotFather
   TELEGRAM_CHAT_ID    @имя_канала или числовой id (-100...)
   DRY_RUN=1           не публиковать, а только напечатать дайджест (для отладки)
-  MODEL               модель (по умолчанию claude-sonnet-4-5)
+  MODEL               модель (по умолчанию gpt-5-mini)
   HOURS               за сколько часов брать новости (по умолчанию 24)
 
 Запуск:  python news_agent.py
@@ -26,11 +26,11 @@ import time
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
-import anthropic
 import feedparser
 import requests
+from openai import OpenAI
 
-MODEL = os.getenv("MODEL", "claude-sonnet-4-5")
+MODEL = os.getenv("MODEL") or "gpt-5-mini"
 HOURS = int(os.getenv("HOURS", "24"))
 DRY_RUN = os.getenv("DRY_RUN") == "1"
 TZ = ZoneInfo("Asia/Almaty")
@@ -49,7 +49,7 @@ SOURCES = {
     ],
 }
 
-client = anthropic.Anthropic()
+client = OpenAI()
 seen_links: set[str] = set()   # статьи, которые агент видел в заголовках
 published = False              # публикуем строго один раз за запуск
 
@@ -151,7 +151,7 @@ TOOLS = [
         "name": "get_headlines",
         "description": f"Заголовки новостей за последние {HOURS} ч. из RSS. "
                        "region='kz' — Казахстан, region='world' — мир.",
-        "input_schema": {"type": "object",
+        "parameters": {"type": "object",
                          "properties": {"region": {"type": "string", "enum": ["kz", "world"]}},
                          "required": ["region"]},
     },
@@ -159,14 +159,14 @@ TOOLS = [
         "name": "read_article",
         "description": "Полный текст статьи по ссылке из get_headlines. Используй, только если "
                        "заголовка и анонса мало, чтобы понять суть. Не больше 5 статей.",
-        "input_schema": {"type": "object",
+        "parameters": {"type": "object",
                          "properties": {"url": {"type": "string"}},
                          "required": ["url"]},
     },
     {
         "name": "publish_digest",
         "description": "Публикует готовый дайджест в Telegram-канал. Вызывается один раз, в конце.",
-        "input_schema": {"type": "object",
+        "parameters": {"type": "object",
                          "properties": {"text": {"type": "string", "description": "Текст в Telegram HTML"}},
                          "required": ["text"]},
     },
@@ -209,27 +209,27 @@ SYSTEM = """Ты — редактор утреннего новостного д
 
 def run(max_steps: int = 15) -> None:
     today = datetime.now(TZ).strftime("%d.%m.%Y")
-    messages = [{"role": "user", "content": f"Подготовь и опубликуй дайджест за {today}."}]
-    system = SYSTEM.replace("{date}", today)
+    messages = [
+        {"role": "system", "content": SYSTEM.replace("{date}", today)},
+        {"role": "user", "content": f"Подготовь и опубликуй дайджест за {today}."},
+    ]
+    tools = [{"type": "function", "function": t} for t in TOOLS]
 
     for step in range(1, max_steps + 1):
-        response = client.messages.create(model=MODEL, max_tokens=4000, system=system,
-                                          tools=TOOLS, messages=messages)
-        messages.append({"role": "assistant", "content": response.content})
+        response = client.chat.completions.create(model=MODEL, messages=messages, tools=tools,
+                                                  max_completion_tokens=16000)
+        msg = response.choices[0].message
+        messages.append(msg.model_dump(exclude_none=True))
 
-        if response.stop_reason != "tool_use":
+        if not msg.tool_calls:          # инструменты больше не нужны: агент закончил
             break
 
-        results = []
-        for block in response.content:
-            if block.type != "tool_use":
-                continue
-            arg = json.dumps(block.input, ensure_ascii=False)
-            print(f"[Шаг {step}] {block.name}({arg[:100]})")
-            output = FUNCTIONS[block.name](**block.input)
-            results.append({"type": "tool_result", "tool_use_id": block.id,
-                            "content": json.dumps(output, ensure_ascii=False)})
-        messages.append({"role": "user", "content": results})
+        for call in msg.tool_calls:     # модель попросила вызвать функции
+            args = json.loads(call.function.arguments or "{}")
+            print(f"[Шаг {step}] {call.function.name}({json.dumps(args, ensure_ascii=False)[:100]})")
+            output = FUNCTIONS[call.function.name](**args)
+            messages.append({"role": "tool", "tool_call_id": call.id,
+                             "content": json.dumps(output, ensure_ascii=False)})
 
     if not published:
         print("Агент завершил работу, но дайджест не опубликован.", file=sys.stderr)
