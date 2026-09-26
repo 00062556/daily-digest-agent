@@ -54,6 +54,13 @@ seen_links: set[str] = set()   # статьи, которые агент вид�
 published = False              # публикуем строго один раз за запуск
 
 
+def annotate(level: str, message: str) -> None:
+    """В GitHub Actions строка ::error::текст показывается в аннотациях запуска."""
+    if os.getenv("GITHUB_ACTIONS"):
+        msg = str(message).replace("%", "%25").replace("\r", "").replace("\n", "%0A")
+        print(f"::{level}::{msg[:1500]}")
+
+
 def clean(text: str, limit: int) -> str:
     """Убирает HTML-теги и лишние пробелы, обрезает до limit символов."""
     text = re.sub(r"<[^>]+>", " ", text or "")
@@ -229,7 +236,9 @@ def run(max_steps: int = 15) -> None:
             print(f"[Шаг {step}] {call.function.name}({json.dumps(args, ensure_ascii=False)[:100]})")
             output = FUNCTIONS[call.function.name](**args)
             if output.get("error") or output.get("errors") or output.get("status") == "error":
-                print(f"          Проблема: {json.dumps(output, ensure_ascii=False)[:500]}")
+                problem = f"{call.function.name}: {json.dumps(output, ensure_ascii=False)[:500]}"
+                print(f"          Проблема: {problem}")
+                annotate("warning", problem)
             messages.append({"role": "tool", "tool_call_id": call.id,
                              "content": json.dumps(output, ensure_ascii=False)})
 
@@ -237,9 +246,14 @@ def run(max_steps: int = 15) -> None:
         last = messages[-1].get("content") if isinstance(messages[-1], dict) else None
         print(f"Последний ответ модели: {last}", file=sys.stderr)
         print("Агент завершил работу, но дайджест не опубликован.", file=sys.stderr)
+        annotate("error", f"Дайджест не опубликован (шагов: {step}). Последний ответ модели: {last}")
         sys.exit(1)  # чтобы запуск по расписанию отметился как упавший
     print(f"Готово: {datetime.now(timezone.utc).isoformat()}")
 
 
 if __name__ == "__main__":
-    run()
+    try:
+        run()
+    except Exception as e:
+        annotate("error", f"{type(e).__name__}: {e}")
+        raise
