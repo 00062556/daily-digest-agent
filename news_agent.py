@@ -1,6 +1,7 @@
 """
-Агент «Дайджест новостей»: читает новости Казахстана и мира,
-выбирает главное, пишет краткую сводку и публикует её в Telegram-канал.
+Агент «Дайджест для разработчика»: читает новости об ИИ, Java/Spring
+и инструментах разработки (IntelliJ IDEA, JetBrains, GitHub), выбирает главное,
+пишет краткую сводку на русском и публикует её в Telegram-канал.
 
 Устроен как простой агент из agent.py:
   LLM (выбирает и пишет) + инструменты (читают RSS, статьи, публикуют) + цикл.
@@ -36,18 +37,30 @@ DRY_RUN = os.getenv("DRY_RUN") == "1"
 TZ = ZoneInfo("Asia/Almaty")
 HEADERS = {"User-Agent": "Mozilla/5.0 (news-digest-agent)"}
 
-# Источники. Добавить новый = одна строка.
+# Источники по разделам. Добавить ленту = одна строка, новый раздел = новый ключ.
 SOURCES = {
-    "kz": [
-        ("Tengrinews", "https://tengrinews.kz/news.rss"),
-        ("Курсив", "https://kz.kursiv.media/feed/"),
+    "ai": [
+        ("TechCrunch AI", "https://techcrunch.com/category/artificial-intelligence/feed/"),
+        ("OpenAI", "https://openai.com/news/rss.xml"),
+        ("Google AI", "https://blog.google/technology/ai/rss/"),
+        ("Hugging Face", "https://huggingface.co/blog/feed.xml"),
+        ("Хабр: ИИ", "https://habr.com/ru/rss/hubs/artificial_intelligence/articles/"),
     ],
-    "world": [
-        ("BBC Русская служба", "https://feeds.bbci.co.uk/russian/rss.xml"),
-        ("BBC World", "https://feeds.bbci.co.uk/news/world/rss.xml"),
-        ("Al Jazeera", "https://www.aljazeera.com/xml/rss/all.xml"),
+    "java": [
+        ("Inside Java", "https://inside.java/feed.xml"),
+        ("InfoQ Java", "https://feed.infoq.com/java"),
+        ("Spring", "https://spring.io/blog.atom"),
+        ("Хабр: Java", "https://habr.com/ru/rss/hubs/java/articles/"),
+    ],
+    "tools": [
+        ("IntelliJ IDEA Blog", "https://blog.jetbrains.com/idea/feed/"),
+        ("JetBrains Blog", "https://blog.jetbrains.com/feed/"),
+        ("GitHub Blog", "https://github.blog/feed/"),
+        ("Hacker News (150+ баллов)", "https://hnrss.org/frontpage?points=150"),
     ],
 }
+SECTIONS = {"ai": "ИИ и нейросети", "java": "Java и Spring", "tools": "IDE и инструменты разработки"}
+PER_SOURCE = 15   # не больше N свежих новостей с одной ленты
 
 client = OpenAI()
 seen_links: set[str] = set()   # статьи, которые агент видел в заголовках
@@ -72,13 +85,13 @@ def clean(text: str, limit: int) -> str:
 # ИНСТРУМЕНТЫ
 # ─────────────────────────────────────────────────────────────
 
-def get_headlines(region: str) -> dict:
-    """Свежие заголовки из RSS региона. Фильтр по времени делает код, не LLM."""
-    if region not in SOURCES:
-        return {"error": f"Неизвестный регион {region}. Доступны: {list(SOURCES)}"}
+def get_headlines(section: str) -> dict:
+    """Свежие заголовки из RSS раздела. Фильтр по времени делает код, не LLM."""
+    if section not in SOURCES:
+        return {"error": f"Неизвестный раздел {section}. Доступны: {list(SOURCES)}"}
     cutoff = time.time() - HOURS * 3600
     items, errors = [], []
-    for name, url in SOURCES[region]:
+    for name, url in SOURCES[section]:
         try:
             resp = requests.get(url, headers=HEADERS, timeout=20)
             resp.raise_for_status()
@@ -86,7 +99,7 @@ def get_headlines(region: str) -> dict:
         except Exception as e:
             errors.append(f"{name}: {e}")
             continue
-        for entry in feed.entries:
+        for entry in feed.entries[:PER_SOURCE]:
             ts = entry.get("published_parsed") or entry.get("updated_parsed")
             if ts and calendar.timegm(ts) < cutoff:  # feedparser отдаёт время в UTC
                 continue
@@ -98,7 +111,7 @@ def get_headlines(region: str) -> dict:
                 "summary": clean(entry.get("summary", ""), 300),
                 "link": link,
             })
-    return {"region": region, "count": len(items[:60]), "items": items[:60], "errors": errors}
+    return {"section": section, "count": len(items), "items": items, "errors": errors}
 
 
 def read_article(url: str) -> dict:
@@ -156,11 +169,11 @@ def publish_digest(text: str) -> dict:
 TOOLS = [
     {
         "name": "get_headlines",
-        "description": f"Заголовки новостей за последние {HOURS} ч. из RSS. "
-                       "region='kz' — Казахстан, region='world' — мир.",
+        "description": f"Заголовки новостей за последние {HOURS} ч. из RSS по разделу. "
+                       + ", ".join(f"'{k}' — {v}" for k, v in SECTIONS.items()) + ".",
         "parameters": {"type": "object",
-                         "properties": {"region": {"type": "string", "enum": ["kz", "world"]}},
-                         "required": ["region"]},
+                         "properties": {"section": {"type": "string", "enum": list(SOURCES)}},
+                         "required": ["section"]},
     },
     {
         "name": "read_article",
@@ -182,32 +195,41 @@ FUNCTIONS = {"get_headlines": get_headlines, "read_article": read_article,
              "publish_digest": publish_digest}
 
 
-SYSTEM = """Ты — редактор утреннего новостного дайджеста для Telegram-канала.
+SYSTEM = """Ты — редактор ежедневного Telegram-дайджеста для Java-разработчика,
+которому интересны искусственный интеллект и инструменты разработки.
 
 Порядок работы:
-1. Получи заголовки по Казахстану и по миру.
-2. Выбери главное: 5–7 новостей по Казахстану и 5–7 по миру.
-   Приоритет: экономика, финансы, политика, бизнес, энергетика, технологии.
-   Пропускай криминальную хронику, спорт, гороскопы и рекламу.
+1. Получи заголовки по всем разделам: ai, java, tools.
+2. Выбери главное: 3–6 новостей на раздел. Если в разделе нет ничего стоящего, пропусти его.
+   Приоритет:
+   - ИИ: новые модели и их возможности, ИИ-ассистенты для кода и агенты, открытые модели,
+     крупные события индустрии, практические статьи для разработчиков;
+   - Java: релизы JDK и JEP, Spring и Spring AI, Kotlin и JVM, производительность, безопасность;
+   - инструменты: релизы и новые функции IntelliJ IDEA и других IDE JetBrains, GitHub и Copilot,
+     заметные open-source-проекты.
+   Пропускай маркетинг, истории клиентов, вакансии, вебинары и повторы.
    Одно событие из нескольких источников — одна новость.
 3. Если по заголовку непонятна суть, прочитай статью через read_article.
 4. Напиши дайджест на русском и опубликуй через publish_digest.
 
 Формат (Telegram HTML, разрешены только <b>, <i>, <a href="...">):
-<b>Дайджест новостей — {date}</b>
+<b>Дайджест разработчика — {date}</b>
 
-<b>Казахстан</b>
-• <b>Короткий заголовок.</b> Одно-два предложения сути. <a href="ссылка">Источник</a>
+<b>ИИ и нейросети</b>
+• <b>Короткий заголовок.</b> Одно-два предложения: что произошло и чем это полезно разработчику. <a href="ссылка">Источник</a>
 
-<b>Мир</b>
+<b>Java и Spring</b>
+• ...
+
+<b>IDE и инструменты разработки</b>
 • ...
 
 Правила:
 - Только факты из полученных новостей, ничего не додумывай.
 - Каждая новость со ссылкой на источник.
-- Англоязычные новости переводи на русский.
+- Англоязычные новости переводи на русский; названия продуктов и технологий оставляй как есть.
 - Символы <, >, & в тексте заменяй на &lt; &gt; &amp;.
-- Весь дайджест до 3500 символов."""
+- Весь дайджест до 3800 символов."""
 
 
 # ─────────────────────────────────────────────────────────────
@@ -218,7 +240,7 @@ def run(max_steps: int = 15) -> None:
     today = datetime.now(TZ).strftime("%d.%m.%Y")
     messages = [
         {"role": "system", "content": SYSTEM.replace("{date}", today)},
-        {"role": "user", "content": f"Подготовь и опубликуй дайджест за {today}."},
+        {"role": "user", "content": f"Подготовь и опубликуй дайджест разработчика за {today}."},
     ]
     tools = [{"type": "function", "function": t} for t in TOOLS]
 
